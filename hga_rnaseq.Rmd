@@ -1,0 +1,344 @@
+---
+title: "hga_rnaseq"
+author: "Mische Holland"
+date: "Mar/24/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = 'lp_rnaseq')
+```
+
+## Set up reference files and sample files for tximport
+```{r set_ref_sample}
+library("tximport")
+library("readr")
+samples <- read.table(file.path(getwd(),"lqsr_rnaseq_samples.txt"), header=TRUE)
+files <- file.path(getwd(),"abundance", samples$tsvfile)
+names(files) <- samples$tsvfile
+tx2gene <- read_delim(file.path(getwd(), "tx2gene_Lp.csv"),delim = ",",col_names=c("tx_ID", "gene"))
+```
+
+## Set up DESeq Object and factor conditions
+```{r set_DESeq}
+txi <- tximport(files, type="kallisto", tx2gene=tx2gene)
+library("DESeq2")
+ddsTxi <- DESeqDataSetFromTximport(txi,
+                                   colData = samples,
+                                   design = ~ density)
+ddsTxi$strain <- factor(ddsTxi$strain, levels = c("WT","lqsR"))
+ddsTxi$hga <- factor(ddsTxi$hga, levels = c("Y","N"))
+ddsTxi$density <- factor(ddsTxi$density, levels = c("HD","LD"))
+ddsTxi
+```
+
+#Prefilter reads < 10
+```{r}
+keep <- rowSums(counts(ddsTxi)) >= 10
+ddsTxi <- ddsTxi[keep,]
+```
+
+#Initialize WT only conditions
+```{r}
+WT_dds <- ddsTxi[,ddsTxi$strain == "WT"]
+WT_dds$density <- relevel(WT_dds$density, ref = "HD")
+WT_dds$strain <- droplevels(WT_dds$strain)
+WT_dds <- DESeq(WT_dds)
+```
+
+#PCA plotting
+```{r plot pretty PCA WT}
+library(ggplot2)
+vsd_WT <- vst(WT_pca, blind=FALSE)
+pcaData <- plotPCA(vsd_WT, intgroup = c( "density", "hga", "run"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar")) 
+ggplot(pcaData, aes(x = PC1, y = PC2, stroke = 2, color = factor(hga), shape = factor(run))) + 
+  geom_point(size =3,aes(fill=factor(hga), alpha=as.character(density))) + geom_point(size =3) +
+  scale_color_manual(values = c("Y" = "green", "N" = "grey"))+
+scale_shape_manual(values=c(21,22,23)) + 
+  scale_alpha_manual(values=c("LD"=0, "HD"=1)) + 
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) + 
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) + 
+  ggtitle("PCA of all conditions, no covariate adjusted") +
+  theme(text=element_text(family="arial")) +
+  coord_fixed()
+#ggsave("pca_wt.png")
+```
+
+##DEG COMPARISONS
+
+#nHGA WT HDvsLD
+```{r}
+wt_nhga <- ddsTxi[,ddsTxi$strain == "WT"]
+wt_nhga <- wt_nhga[,wt_nhga$hga == "N"]
+wt_nhga$density <- relevel(wt_nhga$density, ref = "HD")
+wt_nhga$density <- droplevels(wt_nhga$density)
+
+wt_nhga <- DESeq(wt_nhga)
+wt_res <- results(wt_nhga, alpha=0.05)
+wt_resOrdered <- wt_res[order(wt_res$padj),]
+wt_resOrdered
+summary(wt_res)
+metadata(wt_res)$filterThreshold
+```
+
+#HGA WT HDvsLD
+```{r}
+wt_hga <- ddsTxi[,ddsTxi$strain == "WT"]
+wt_hga <- wt_hga[,wt_hga$hga == "Y"]
+wt_hga$density <- relevel(wt_hga$density, ref = "HD")
+wt_hga$density <- droplevels(wt_hga$density)
+
+wt_hga <- DESeq(wt_hga)
+wth_res <- results(wt_hga, alpha=0.05)
+wth_resOrdered <- wth_res[order(wth_res$padj),]
+wth_resOrdered
+summary(wth_res)
+```
+
+#merge HDvLD results into dataframe
+```{r}
+merged_padj <- DataFrame(wt_res$padj, row.names = rownames(wt_res))
+merged_padj <- cbind(merged_padj, wt_res$log2FoldChange)
+
+merged_padj <- cbind(merged_padj, wth_res$padj)
+merged_padj <- cbind(merged_padj, wth_res$log2FoldChange)
+
+merged_padj
+#write.csv(merged_padj,"~/jupyter_rmd/HDvLD_pval_log2.csv", row.names = TRUE)
+```
+
+
+## Redo all of the above but comparing between HGA+/- instead of density
+#HD WT nHGAvHGA
+```{r}
+wt_HD <- ddsTxi[,ddsTxi$strain == "WT"]
+wt_HD <- wt_HD[,wt_HD$density == "HD"]
+wt_HD$hga <- relevel(wt_HD$hga, ref = "N")
+wt_HD$hga <- droplevels(wt_HD$hga)
+
+wt_HD <- DESeq(wt_HD)
+wt_HD_res <- results(wt_HD, alpha=0.05)
+summary(wt_HD_res)
+```
+
+#LD WT nHGAvHGA
+```{r}
+wt_LD <- ddsTxi[,ddsTxi$strain == "WT"]
+wt_LD <- wt_LD[,wt_LD$density == "LD"]
+wt_LD$hga <- relevel(wt_LD$hga, ref = "N")
+wt_LD$hga <- droplevels(wt_LD$hga)
+
+wt_LD <- DESeq(wt_LD)
+wt_LD_res <- results(wt_LD, alpha=0.05)
+summary(wt_LD_res)
+```
+export just WT results
+```{r export}
+#merged_padj <- DataFrame(wt_HD_res$pvalue, row.names = rownames(wt_HD_res))
+merged_padj <- cbind(merged_padj, wt_HD_res$padj)
+merged_padj <- cbind(merged_padj, wt_HD_res$log2FoldChange)
+
+#merged_padj <- cbind(merged_padj, wt_LD_res$pvalue)
+merged_padj <- cbind(merged_padj, wt_LD_res$padj)
+merged_padj <- cbind(merged_padj, wt_LD_res$log2FoldChange)
+
+merged_padj
+#write.csv(merged_padj,"~/jupyter_rmd/WT_nHGAvHGA_pval_adjpval_log2.csv", row.names = TRUE)
+```
+
+#SCATTER MATRIX
+```{r}
+read_counts <- data.frame(counts(ddsTxi))
+
+WT_count <- read_counts[c("X112421_49_abundance.tsv","X112421_50_abundance.tsv",
+              "X112421_51_abundance.tsv","X112421_52_abundance.tsv",
+              "X112421_57_abundance.tsv","X112421_58_abundance.tsv",
+              "X112421_59_abundance.tsv","X112421_60_abundance.tsv",
+              "X112421_65_abundance.tsv","X112421_66_abundance.tsv",
+              "X112421_67_abundance.tsv","X112421_68_abundance.tsv")]
+colnames(WT_count) <- c("LD_HGA_R4","LD_N_R4","HD_HGA_R4","HD_N_R4","LD_HGA_R5","LD_N_R5","HD_HGA_R5","HD_N_R5","LD_HGA_R6","LD_N_R6","HD_HGA_R6","HD_N_R6")
+
+```
+
+```{R scatter matrices}
+# Correlation panel
+panel.cor <- function(x, y){
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- round(cor(x, y), digits=2)
+    txt <- paste0("R = ", r)
+    cex.cor <- 0.7/strwidth(txt)
+    text(3, 3, txt, cex = cex.cor)
+    #cex.axis = 5
+    #text(3, 3, txt, cex = cex.cor*r)
+}
+# Customize upper panel
+upper.panel<-function(x, y){
+  points(x,y)
+}
+
+#ALL VS ALL
+pairs(WT_count, log="xy",lower.panel = panel.cor,upper.panel = upper.panel, main="all vs all Scatterplot Matrix")
+
+#LD+ all replicates
+#png(file = "/bgfs/tlevin/migs/lp_rnaseq/graphs_R/ld_hga_matrix.png", bg = "transparent")
+pairs(~LD_HGA_R4+LD_HGA_R5+LD_HGA_R6, data=WT_count, cex.labels=2, pch=19, cex.axis = 1.75, log="xy", main="LD+ Scatterplot Matrix",lower.panel = NULL)
+#dev.off()
+
+#LD- all replicates
+#png(file = "/bgfs/tlevin/migs/lp_rnaseq/graphs_R/ld_nhga_matrix.png", bg = "transparent")
+pairs(~LD_N_R4+LD_N_R5+LD_N_R6, data=WT_count, log="xy",lower.panel = panel.cor,upper.panel = upper.panel, main="LD- Scatterplot Matrix")
+#dev.off()
+
+#R4, hga/nohga
+#png(file = "/bgfs/tlevin/migs/lp_rnaseq/graphs_R/R4_matrix.png", bg = "transparent")
+pairs(~LD_HGA_R4+LD_N_R4+HD_HGA_R4+HD_N_R4, data=WT_count, log="xy",lower.panel = panel.cor,upper.panel = upper.panel, main="R4 Scatterplot Matrix")
+#dev.off()
+
+```
+
+##HEATMAP GENES OF INTEREST
+```{r ros ggplot heatmap}
+library(reshape)
+library(tidyverse)
+
+ros_lpg <- c("lpg2965","lpg2350","lpg2349",
+             "lpg2348","lpg2967","lpg0194","lpg2389","lpg1815","lpg0173")
+ros_names <- c("ahpC1","ahpC2","ahpD","sodC","sodB","katA","katB","oxyR","oxyR1")
+ros_data <- melt(data.frame(gene=ros_names,
+                            WT_count[ros_lpg,c("LD_N_R4","LD_N_R5","LD_N_R6",
+                                               "LD_HGA_R4","LD_HGA_R5","LD_HGA_R6",
+                                               "HD_N_R4","HD_N_R5","HD_N_R6",
+                                               "HD_HGA_R4","HD_HGA_R5","HD_HGA_R6")]))
+colnames(ros_data) <- c("gene", "condition", "count")
+ggplot(ros_data, aes(x=condition, y=fct_inorder(gene), fill=log(count))) +
+  scale_fill_gradient2(low = "blue",
+                       mid = "white",
+                       high = "red",
+                       midpoint = median(log(ros_data[,"count"]))) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  scale_y_discrete(limits=rev)+
+  labs(y='', x='')+
+  theme(axis.text.x=element_blank(),
+        text = element_text(size = 20),
+        legend.title = element_text(size = 10)) +
+  geom_tile()+
+  coord_fixed()+
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 15))
+#ggsave("ros_deg_heatmap.png", bg = "transparent")
+```
+```{r iron uptake}
+iron_lpg <- c("lpg2800","lpg2657","lpg2658","lpg1325","lpg1324","lpg1323",
+              "lpg1326","lpg0858","lpg0124","lpg0232","lpg0024")
+iron_des <- c("frgA putative siderophore synthase","feoB","feoA",
+                "lbtA siderophore biosynthesis","lbtB siderophore IM export",
+                "lbtC siderophore IM import","lbtU siderophore OM receptor",
+                "ccmC, siderophore production","cyc4, siderophore production",
+                "fur transcriptional regulator","hbp, hemin-binding protein")
+iron_names <- c("frgA","feoB","feoA","lbtA","lbtB","lbtC","lbtU","ccmC","cyc4","fur","hbp")
+
+iron_data <- melt(data.frame(gene=iron_names,WT_count[iron_lpg,c("LD_N_R4","LD_N_R5","LD_N_R6",
+                                               "LD_HGA_R4","LD_HGA_R5","LD_HGA_R6",
+                                               "HD_N_R4","HD_N_R5","HD_N_R6",
+                                               "HD_HGA_R4","HD_HGA_R5","HD_HGA_R6")]))
+colnames(iron_data) <- c("gene", "condition", "count")
+ggplot(iron_data, aes(x=condition, y=fct_inorder(gene), fill=log(count))) +
+  scale_fill_gradient2(low = "blue",
+                       mid = "white",
+                       high = "red",
+                       midpoint = median(log(iron_data[,"count"]))) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  scale_y_discrete(limits=rev)+
+  labs(y='', x='')+
+  theme(axis.text.x=element_blank(),
+        text = element_text(size = 20),
+        legend.title = element_text(size = 10)) +
+  geom_tile()+
+  coord_fixed()+
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 15))
+#ggsave("iron_deg_heatmap.png", bg = "transparent")
+```
+
+```{r hga heatmap}
+hga_lpg <- c("lpg1999","lpg1998","lpg2278","lpg1285","lpg2279","lpg2280")
+hga_names <- c("pphA","hisc2","hpd","hmgA","hmgB","hmgC")
+
+hga_data <- melt(data.frame(gene=hga_names,WT_count[hga_lpg,c("LD_N_R4","LD_N_R5","LD_N_R6",
+                                               "LD_HGA_R4","LD_HGA_R5","LD_HGA_R6",
+                                               "HD_N_R4","HD_N_R5","HD_N_R6",
+                                               "HD_HGA_R4","HD_HGA_R5","HD_HGA_R6")]))
+colnames(hga_data) <- c("gene", "condition", "count")
+ggplot(hga_data, aes(x=condition, y=fct_inorder(gene), fill=log(count))) +
+  scale_fill_gradient2(low = "blue",
+                       mid = "white",
+                       high = "red",
+                       midpoint = median(log(hga_data[,"count"]))) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  scale_y_discrete(limits=rev)+
+  labs(y='', x='')+
+  theme(axis.text.x=element_blank(),
+        text = element_text(size = 20),
+        legend.title = element_text(size = 10)) +
+  geom_tile()+
+  coord_fixed()+
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 10))
+#ggsave("hga_deg_heatmap.png", bg = "transparent")
+```
+```{r lqs pathway heatmap}
+lqs_lpg <- c("lpg2731","lpg2734","lpg2506","lpg2732","lpg4092")
+lqs_names <- c("lqsA","lqsS","lqsT","lqsR","lvbR")
+
+lqs_data <- melt(data.frame(gene=lqs_names,WT_count[lqs_lpg,c("LD_N_R4","LD_N_R5","LD_N_R6",
+                                               "LD_HGA_R4","LD_HGA_R5","LD_HGA_R6",
+                                               "HD_N_R4","HD_N_R5","HD_N_R6",
+                                               "HD_HGA_R4","HD_HGA_R5","HD_HGA_R6")]))
+colnames(lqs_data) <- c("gene", "condition", "count")
+ggplot(lqs_data, aes(x=condition, y=fct_inorder(gene), fill=log(count))) +
+  scale_fill_gradient2(low = "blue",
+                       mid = "white",
+                       high = "red",
+                       midpoint = median(log(lqs_data[,"count"]))) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  scale_y_discrete(limits=rev)+
+  labs(y='', x='')+
+  theme(axis.text.x=element_blank(),
+        text = element_text(size = 20),
+        legend.title = element_text(size = 10)) +
+  geom_tile()+
+  coord_fixed()+
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 10))
+#ggsave("lqs_deg_heatmap.png", bg = "transparent")
+```
+```{r ggplot heatmap all}
+all_names <- c(ros_names, iron_names, hga_names, lqs_names)
+all_lpg <- c(ros_lpg, iron_lpg, hga_lpg, lqs_lpg)
+
+all_data <- melt(data.frame(gene=all_names,WT_count[all_lpg,c("LD_N_R4","LD_N_R5","LD_N_R6",
+                                               "LD_HGA_R4","LD_HGA_R5","LD_HGA_R6",
+                                               "HD_N_R4","HD_N_R5","HD_N_R6",
+                                               "HD_HGA_R4","HD_HGA_R5","HD_HGA_R6")]))
+colnames(all_data) <- c("gene", "condition", "count")
+ggplot(all_data, aes(x=condition, y=fct_inorder(gene), fill=log(count))) +
+  scale_fill_gradient2(low = "light blue",
+                       mid = "white",
+                       high = "red",
+                       midpoint = median(log(all_data[,"count"]))) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  scale_y_discrete(limits=rev)+
+  labs(y='', x='')+
+  theme(axis.text.x=element_blank(),
+        text = element_text(size = 10),
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 15)) +
+  geom_tile()+
+  coord_fixed()+
+  guides(fill = guide_colourbar(barwidth = 0.5,
+                                barheight = 15))
+#ggsave("all_deg_heatmap.png", bg = "transparent")
+```
